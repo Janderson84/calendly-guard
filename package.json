@@ -1,7 +1,8 @@
 {
   "name": "calendly-guard",
-  "version": "1.0.0",
-  "description": "Auto-cancel Calendly bookings with invalid emails",
+  "version": "1.1.0",
+  "description": "Email validation, correction investigation, duplicate detection & lead enrichment for SalesCloser Calendly bookings",
+  "type": "module",
   "private": true,
   "devDependencies": {
     "vercel": "^50.26.0"

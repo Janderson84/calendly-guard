@@ -5,9 +5,17 @@
  *  1. Calendly fires invitee.created webhook
  *  2. Fetch the scheduled event from Calendly to get AE + start time
  *  3. Validate invitee email via Reoon
- *  4. If invalid/disposable → post alert to Slack #bad-email, tag the AE
- *  5. If valid → enrich with Apollo.io (person + company data)
- *  6. Update Pipedrive person record with enriched data + add note
+ *  4. If invalid/disposable → investigate for likely-correct email
+ *     (Apollo name search, domain typo correction, MX + Reoon re-verify)
+ *  5. Post alert to Slack #bad-email with suggested corrections, tag the AE
+ *  6. Check for duplicate bookings (same email, other upcoming events)
+ *  7. If valid → enrich with Apollo.io (person + company data)
+ *  8. Update Pipedrive person record with enriched data + add note
+ *  9. If duplicates found → flag in Slack + Pipedrive note
+
+import { investigateInvalidEmail } from '../lib/investigate-email.js';
+import { checkDuplicateBookings } from '../lib/duplicates.js';
+
  */
 
 const REOON_API_KEY    = process.env.REOON_API_KEY;
@@ -228,7 +236,7 @@ async function updatePipedrive(email, bookingName, apollo) {
 
 // ── Slack ─────────────────────────────────────────────────────────────────────
 
-async function postSlackAlert({ ae, prospectName, prospectEmail, prospectPhone, meetingTime, eventTypeName, emailStatus }) {
+async function postSlackAlert({ ae, prospectName, prospectEmail, prospectPhone, meetingTime, eventTypeName, emailStatus, investigation, duplicates }) {
   const aeMention = ae?.slack ? `<@${ae.slack}>` : ae?.name || 'Unknown AE';
   const phone = prospectPhone || '_not provided_';
   const time = meetingTime
@@ -239,6 +247,96 @@ async function postSlackAlert({ ae, prospectName, prospectEmail, prospectPhone, 
       })
     : '_unknown_';
 
+  // Build alert blocks — base alert + optional investigation suggestions + duplicates
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🚨 *Bad email detected* — ${aeMention}, this meeting has an invalid email address. Reach out to them by phone or troubleshoot the email before the demo.`,
+      },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Prospect:*\n${prospectName}` },
+        { type: 'mrkdwn', text: `*Email (invalid):*\n${prospectEmail}` },
+        { type: 'mrkdwn', text: `*Phone:*\n${phone}` },
+        { type: 'mrkdwn', text: `*Demo time:*\n${time}` },
+        { type: 'mrkdwn', text: `*Event type:*\n${eventTypeName}` },
+        { type: 'mrkdwn', text: `*Email status:*\n\`${emailStatus}\`` },
+      ],
+    },
+  ];
+
+  // ── Email investigation suggestions ──────────────────────────────
+  if (investigation?.suggestions?.length > 0) {
+    const top = investigation.suggestions[0];
+    const otherCount = investigation.suggestions.length - 1;
+
+    const suggestionLines = investigation.suggestions.slice(0, 3).map((s, i) => {
+      const icon = s.confidence === 'high' ? '✅' : '⚠️';
+      const source = s.source.startsWith('apollo') ? 'Apollo match' : 'Domain fix';
+      let line = `${icon} *${s.email}* — ${source}`;
+      if (s.confidence === 'high') line += ' (verified valid)';
+      else if (s.confidence === 'medium') line += ' (catch-all, unconfirmed)';
+      if (s.title)    line += `\n     Title: ${s.title}`;
+      if (s.company)  line += `\n     Company: ${s.company}`;
+      if (s.phone && s.phone !== prospectPhone) line += `\n     Phone: ${s.phone}`;
+      if (s.linkedin) line += `\n     LinkedIn: ${s.linkedin}`;
+      if (s.website)  line += `\n     Website: ${s.website}`;
+      return line;
+    });
+
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🔍 *Email investigation found ${investigation.suggestions.length} possible correction${investigation.suggestions.length > 1 ? 's' : ''}:*\n\n${suggestionLines.join('\n\n')}${otherCount > 2 ? `\n\n_and ${otherCount - 2} more…_` : ''}`,
+      },
+    });
+  } else if (investigation) {
+    // Investigation ran but found nothing
+    const notes = investigation.investigationNotes?.slice(0, 3) || [];
+    const noteText = notes.length
+      ? notes.map(n => `• ${n}`).join('\n')
+      : 'No corrections found.';
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🔍 *Email investigation ran but found no likely corrections.* Research manually.\n${noteText}`,
+      },
+    });
+  }
+
+  // ── Duplicate booking warning ────────────────────────────────────
+  if (duplicates?.count > 0) {
+    const dupLines = duplicates.events.slice(0, 3).map(d => {
+      const dt = new Date(d.startTime).toLocaleString('en-US', {
+        timeZone: 'America/Vancouver',
+        weekday: 'short', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+      return `• ${dt} — ${d.eventName || 'demo'}`;
+    });
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `⚠️ *Duplicate booking detected* — this email has ${duplicates.count} other upcoming meeting${duplicates.count > 1 ? 's' : ''}:\n${dupLines.join('\n')}`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `Validated by Reoon · Investigated by Calendly Guard${investigation?.suggestions?.length ? ' · 🔍 suggestions included' : ''}`,
+    }],
+  });
+
   const res = await fetch('https://slack.com/api/chat.postMessage', {
     method: 'POST',
     headers: {
@@ -248,33 +346,7 @@ async function postSlackAlert({ ae, prospectName, prospectEmail, prospectPhone, 
     body: JSON.stringify({
       channel: SLACK_CHANNEL,
       text: `🚨 Bad email on a new booking — ${ae?.name || 'Unknown AE'}`,
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `🚨 *Bad email detected* — ${aeMention}, this meeting has an invalid email address. Reach out to them by phone or troubleshoot the email before the demo.`,
-          },
-        },
-        {
-          type: 'section',
-          fields: [
-            { type: 'mrkdwn', text: `*Prospect:*\n${prospectName}` },
-            { type: 'mrkdwn', text: `*Email (invalid):*\n${prospectEmail}` },
-            { type: 'mrkdwn', text: `*Phone:*\n${phone}` },
-            { type: 'mrkdwn', text: `*Demo time:*\n${time}` },
-            { type: 'mrkdwn', text: `*Event type:*\n${eventTypeName}` },
-            { type: 'mrkdwn', text: `*Email status:*\n\`${emailStatus}\`` },
-          ],
-        },
-        {
-          type: 'context',
-          elements: [{
-            type: 'mrkdwn',
-            text: `Validated by Reoon · Calendly Guard`,
-          }],
-        },
-      ],
+      blocks,
     }),
   });
 
@@ -379,17 +451,78 @@ export default async function handler(req, res) {
   // ── Invalid email path ──────────────────────────────────────────────────────
   if (isInvalid || isDisposable) {
     const emailStatus = isInvalid ? status : 'disposable';
+    console.log(`[Guard] Invalid email (${emailStatus}) — investigating…`);
+
+    // Run email investigation (Apollo name search + domain typo correction)
+    let investigation = null;
+    try {
+      investigation = await investigateInvalidEmail({ email, name, phone });
+      console.log(`[Guard] Investigation: ${investigation.suggestions.length} suggestion(s) found`);
+      if (investigation.suggestions.length > 0) {
+        console.log(`[Guard] Top suggestion: ${investigation.suggestions[0].email} (${investigation.suggestions[0].confidence})`);
+      }
+    } catch (err) {
+      console.error('[Guard] Email investigation failed:', err.message);
+    }
+
+    // Check for duplicate bookings (same email, other upcoming events)
+    let duplicates = { count: 0, events: [] };
+    try {
+      const scheduledEvent = await fetchCalendlyEvent(eventUri);
+      const organizationUri = scheduledEvent?.event_memberships?.[0]?.user
+        ? scheduledEvent.event_memberships[0].user.replace(/\/users\/[^/]+$/, '')
+        : null;
+      // Fetch organization URI from the user
+      let orgUri = null;
+      if (CALENDLY_TOKEN) {
+        try {
+          const meRes = await fetch('https://api.calendly.com/users/me', {
+            headers: { 'Authorization': `Bearer ${CALENDLY_TOKEN}` },
+          });
+          if (meRes.ok) {
+            const meData = await meRes.json();
+            orgUri = meData?.resource?.current_organization;
+          }
+        } catch {}
+      }
+      if (orgUri) {
+        duplicates = await checkDuplicateBookings(email, eventUri, orgUri);
+        if (duplicates.count > 0) {
+          console.log(`[Guard] Duplicate bookings: ${duplicates.count} other upcoming event(s)`);
+        }
+      }
+    } catch (err) {
+      console.error('[Guard] Duplicate check failed:', err.message);
+    }
+
     console.log(`[Guard] Firing Slack alert for ${email} (${emailStatus})`);
 
     try {
-      await postSlackAlert({ ae, prospectName: name, prospectEmail: email, prospectPhone: phone, meetingTime: startTime, eventTypeName, emailStatus });
+      await postSlackAlert({
+        ae,
+        prospectName: name,
+        prospectEmail: email,
+        prospectPhone: phone,
+        meetingTime: startTime,
+        eventTypeName,
+        emailStatus,
+        investigation,
+        duplicates,
+      });
       console.log(`[Guard] Slack alert sent`);
     } catch (err) {
       console.error('[Guard] Slack post failed:', err.message);
       return res.status(200).json({ action: 'slack_failed', error: err.message });
     }
 
-    return res.status(200).json({ action: 'alerted', email, emailStatus, ae: ae?.name });
+    return res.status(200).json({
+      action: 'alerted',
+      email,
+      emailStatus,
+      ae: ae?.name,
+      suggestions: investigation?.suggestions?.map(s => ({ email: s.email, confidence: s.confidence, source: s.source })) || [],
+      duplicates: duplicates.count,
+    });
   }
 
   // ── Valid email path — enrich + update Pipedrive ────────────────────────────
@@ -403,6 +536,61 @@ export default async function handler(req, res) {
   }
 
   const personId = await updatePipedrive(email, name, apollo);
+
+  // Check for duplicate bookings on valid emails too
+  let duplicates = { count: 0, events: [] };
+  try {
+    let orgUri = null;
+    if (CALENDLY_TOKEN) {
+      try {
+        const meRes = await fetch('https://api.calendly.com/users/me', {
+          headers: { 'Authorization': `Bearer ${CALENDLY_TOKEN}` },
+        });
+        if (meRes.ok) {
+          const meData = await meRes.json();
+          orgUri = meData?.resource?.current_organization;
+        }
+      } catch {}
+    }
+    if (orgUri) {
+      duplicates = await checkDuplicateBookings(email, eventUri, orgUri);
+      if (duplicates.count > 0) {
+        console.log(`[Guard] Duplicate bookings: ${duplicates.count} other upcoming event(s)`);
+      }
+    }
+  } catch (err) {
+    console.error('[Guard] Duplicate check failed:', err.message);
+  }
+
+  // If duplicates found, add a note to Pipedrive and notify via Telegram
+  if (duplicates.count > 0) {
+    const dupTimes = duplicates.events.map(d => {
+      return new Date(d.startTime).toLocaleString('en-US', {
+        timeZone: 'America/Vancouver',
+        weekday: 'short', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+    }).join(', ');
+
+    if (personId) {
+      try {
+        await pdPost('/notes', {
+          content: `⚠️ *Duplicate booking detected* — this email has ${duplicates.count} other upcoming meeting(s): ${dupTimes}. Consider canceling extras to avoid no-shows.`,
+          person_id: personId,
+        });
+      } catch (e) { console.warn('[Guard] Could not add duplicate note to PD:', e.message); }
+    }
+
+    // Telegram alert about duplicates
+    await notifyTelegram([
+      `⚠️ <b>Duplicate booking</b>`,
+      ``,
+      `<b>Prospect:</b> ${name} &lt;${email}&gt;`,
+      `<b>AE:</b> ${ae?.name || 'Unknown'}`,
+      `<b>Other upcoming meetings:</b> ${duplicates.count}`,
+      ...dupTimes.split(', ').map(t => `  • ${t}`),
+    ].join('\n'));
+  }
 
   // Telegram confirmation on successful enrichment
   if (apollo && personId) {
@@ -430,5 +618,6 @@ export default async function handler(req, res) {
     enriched:  !!apollo,
     apollo:    apollo ? { name: apollo.fullName, title: apollo.title, company: apollo.company, phone: apollo.phone } : null,
     pipedrivePersonId: personId,
+    duplicates: duplicates.count,
   });
 }
