@@ -15,6 +15,30 @@
 
 import { investigateInvalidEmail } from '../lib/investigate-email.js';
 import { checkDuplicateBookings } from '../lib/duplicates.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Load AE config from config/aes.json — add new AEs there, no code changes needed
+let _aeMap = null;
+function getAeMap() {
+  if (_aeMap) return _aeMap;
+  try {
+    const raw = readFileSync(join(__dirname, '..', 'config', 'aes.json'), 'utf-8');
+    const arr = JSON.parse(raw);
+    _aeMap = {};
+    for (const ae of arr) {
+      _aeMap[ae.calendly_uuid] = { name: ae.name, slack: ae.slack_id };
+    }
+    console.log(`[Guard] Loaded ${Object.keys(_aeMap).length} AEs from config/aes.json`);
+  } catch (err) {
+    console.error('[Guard] Failed to load config/aes.json, using empty AE map:', err.message);
+    _aeMap = {};
+  }
+  return _aeMap;
+}
 
  */
 
@@ -28,16 +52,9 @@ const PIPEDRIVE_BASE   = 'https://api.pipedrive.com/v1';
 const TG_BOT_TOKEN     = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID       = '8517055255';
 
-// Calendly user UUID → AE info + Slack ID
-const AE_MAP = {
-  '28ea4155-6f63-476f-bbe8-61e4bc76a7ee': { name: 'Alfred Du',           slack: 'U0A7T58JVHP' },
-  'bf87767a-d035-494f-84b8-6954260116fe': { name: 'David Morawietz',      slack: 'U0A89DVTWQ1' },
-  '6510c411-b717-4835-8170-4ae1ac0e6643': { name: 'Edgar Arana',          slack: 'U0A6YPUEB7H' },
-  'a14a40a4-bffb-40d4-9a9e-59c877a57244': { name: 'Gleidson Rocha',       slack: 'U0A88GBQQQ0' },
-  'c829da73-5d2a-4aae-8963-89a9219aa7e8': { name: 'Marc James Beauchamp', slack: 'U0A7T59MFCZ' },
-  'ae002a76-0ba4-43b2-939f-7abddeddf190': { name: 'Pedro Cavagnari',      slack: 'U0A7HQWP3GU' },
-  'd4456135-4bd4-488f-8e9d-a867e8c8697d': { name: 'Vanessa Fortune',      slack: 'U0A7T58H2MP' },
-};
+// AE map loaded from config/aes.json — see getAeMap() above
+// To add a new AE: GET /api/ae-lookup?email=newae@salescloser.ai
+// Then paste the configEntry into config/aes.json
 
 // Reoon statuses treated as undeliverable
 const INVALID_STATUSES = ['invalid', 'spamtrap', 'abuse'];
@@ -419,7 +436,7 @@ export default async function handler(req, res) {
 
     for (const m of scheduledEvent?.event_memberships || []) {
       const uuid = (m?.user || '').split('/').pop();
-      if (AE_MAP[uuid]) { ae = AE_MAP[uuid]; break; }
+      if (getAeMap()[uuid]) { ae = getAeMap()[uuid]; break; }
     }
   } catch (err) {
     console.warn('[Guard] Could not fetch Calendly event:', err.message);

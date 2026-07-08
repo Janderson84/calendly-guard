@@ -1,0 +1,44 @@
+[
+  {
+    "calendly_uuid": "28ea4155-6f63-476f-bbe8-61e4bc76a7ee",
+    "name": "Alfred Du",
+    "slack_id": "U0A7T58JVHP"
+  },
+  {
+    "calendly_uuid": "bf87767a-d035-494f-84b8-6954260116fe",
+    "name": "David Morawietz",
+    "slack_id": "U0A89DVTWQ1"
+  },
+  {
+    "calendly_uuid": "6510c411-b717-4835-8170-4ae1ac0e6643",
+    "name": "Edgar Arana",
+    "slack_id": "U0A6YPUEB7H"
+  },
+  {
+    "calendly_uuid": "a14a40a4-bffb-40d4-9a9e-59c877a57244",
+    "name": "Gleidson Rocha",
+    "slack_id": "U0A88GBQQQ0"
+  },
+  {
+    "calendly_uuid": "c829da73-5d2a-4aae-8963-89a9219aa7e8",
+    "name": "Marc James Beauchamp",
+    "slack_id": "U0A7T59MFCZ"
+  },
+  {
+    "calendly_uuid": "ae002a76-0ba4-43b2-939f-7abddeddf190",
+    "name": "Pedro Cavagnari",
+    "slack_id": "U0A7HQWP3GU"
+  },
+  {
+    "calendly_uuid": "d4456135-4bd4-488f-8e9d-a867e8c8697d",
+    "name": "Vanessa Fortune",
+    "slack_id": "U0A7T58H2MP"
+  },
+  {
+    "calendly_uuid": "34b6f382-a7e7-4aec-9488-0500e2152418",
+    "name": "Donavyn Meadows",
+    "slack_id": "PENDING_LOOKUP",
+    "email": "donavyn.m@salescloser.ai",
+    "_note": "Slack ID pending — run GET /api/ae-lookup?email=donavyn.m@salescloser.ai on the deployed URL to get it, then replace PENDING_LOOKUP"
+  }
+]
